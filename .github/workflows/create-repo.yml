@@ -1,0 +1,154 @@
+name: Create Repository
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/workflows/**'
+  workflow_dispatch:
+  
+jobs:
+  create-repo:
+    runs-on: ubuntu-latest
+    outputs:
+      repo_name: ${{ steps.read-json.outputs.repo_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install axios
+
+      - name: Read JSON file
+        id: read-json
+        run: |
+          repo_name=$(jq -r '.repo_name' repo-details.json)
+          source_repo=$(jq -r '.source_repo' repo-details.json)
+          destination_repo=$(jq -r '.destination_repo' repo-details.json)
+          echo "app remo name: $repo_name"
+          echo "source remo name: $source_repo"
+          echo "destination remo name: $destination_repo"
+          echo "repo_name=$repo_name" >> $GITHUB_OUTPUT
+          echo "source_repo=$source_repo" >> $GITHUB_OUTPUT
+          echo "destination_repo=$destination_repo" >> $GITHUB_OUTPUT
+      
+      - name: Check if repository exists
+        id: check-repo
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository_owner }}/${{ steps.read-json.outputs.repo_name }})
+          echo "response is : "$response
+          if [ $response -eq 200 ]; then
+            echo "repo_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "repo_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create repository
+        if: steps.check-repo.outputs.repo_exists == 'false'
+        run: |
+          repo_details=${{ steps.read-repo-details.outputs.repo_details }}
+          curl -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
+               -d '{"name":"${{ steps.read-json.outputs.repo_name }}"}' \
+               https://api.github.com/user/repos
+      
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/${{ steps.read-json.outputs.source_repo }}
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Copy contents to destination repository
+        run: |
+          git clone https://github.com/${{ github.repository_owner }}/${{ steps.read-json.outputs.destination_repo }}.git destination-repo
+          rsync -av --progress . destination-repo --exclude .git --exclude repo-config.json --exclude destination-repo
+          cd destination-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git status
+          git add .
+          if git diff-index --quiet HEAD; then
+            echo "No Changes to commit"
+          else
+            git commit -m "Copy contents from source repository"
+            git push https://${{ secrets.GH_TOKEN }}@github.com/${{ github.repository_owner }}/${{ steps.read-json.outputs.destination_repo }}.git
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  create-tfvars:
+    runs-on: ubuntu-latest
+    needs: create-repo
+    steps:
+    - name: Checkout source repository
+      uses: actions/checkout@v4
+      
+    - name: Read configuration from JSON
+      id: read-json
+      run: |
+        # folder=$(jq -r '.folder' ec2-config.json)
+        variables=$(jq -r '.variables | to_entries | map("\(.key) = \"\(.value)\"") | .[]' ec2-config.json)
+        echo "$variables" > variables.txt
+        echo "variables<<EOF" >> $GITHUB_ENV
+        cat variables.txt >> $GITHUB_ENV
+        echo "EOF" >> $GITHUB_ENV
+    
+    - name: Checkout source repository
+      uses: actions/checkout@v4
+      with:
+          repository: ${{ github.repository_owner }}/${{ needs.create-repo.outputs.repo_name }}
+          token: ${{ secrets.GH_TOKEN }}
+
+    - name: Create terraform.tfvars file
+      run: |
+        cd ec2
+        echo "${{ env.variables }}" > terraform.tfvars
+        ls
+
+    - name: Commit and push changes
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add .
+        if git diff-index --quiet HEAD; then
+          echo "No changes to commit"
+        else
+          git commit -m "Update terraform.tfvars"
+          git push https://***@github.com/SVenkataSivaSatish/app-repo1.git
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  
+  create-workflow:
+    runs-on: ubuntu-latest
+    needs: create-tfvars
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Read workflow template
+      id: read_template
+      run: |
+        template=$(cat action.yaml | base64)
+        echo "template=$template" >> $GITHUB_OUTPUT
+
+    - name: Create workflow file in target repo
+      env:
+        TARGET_REPO_PAT: ${{ secrets.GH_TOKEN }}
+      run: |
+        template=$(echo "${{ steps.read_template.outputs.template }}" | base64 --decode)
+        curl -X PUT \
+          -H "Authorization: token $TARGET_REPO_PAT" \
+          -H "Accept: application/vnd.github.v3+json" \
+          https://api.github.com/repos/${{ github.repository_owner }}/${{ needs.create-repo.outputs.repo_name }}/contents/.github/workflows/action.yaml \
+          -d @- << EOF
+        {
+          "message": "Create workflow file",
+          "content": "$template"
+        }
+        EOF
