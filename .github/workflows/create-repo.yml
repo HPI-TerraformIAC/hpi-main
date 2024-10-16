@@ -51,7 +51,7 @@ jobs:
 
       - name: Create repository
         if: steps.check-repo.outputs.repo_exists == 'false'
-          run: |
+        run: |
             curl -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
                  -H "Accept: application/vnd.github.v3+json" \
                  https://api.github.com/orgs/${{ github.repository_owner }}/repos \
